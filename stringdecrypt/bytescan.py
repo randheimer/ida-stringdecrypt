@@ -123,9 +123,12 @@ def entropy_blobs(
         chunk = data[offset:offset + max_length]
         if len(chunk) < min_length:
             break
-        entropy = shannon_entropy(chunk)
-        printable = printable_ratio(chunk)
-        if entropy >= threshold and printable < 0.82 and chunk.count(0) < len(chunk) * 0.8:
+        # Printable text is handled by the string scanner; avoid paying for an
+        # entropy histogram on it.  The same applies to zero-padded regions.
+        if printable_ratio(chunk) >= 0.82 or chunk.count(0) >= len(chunk) * 0.8:
+            offset += step
+            continue
+        if shannon_entropy(chunk) >= threshold:
             hits.append(StringHit(base_ea + offset, chunk, "", "raw", "entropy"))
             offset += max_length // 2
         else:

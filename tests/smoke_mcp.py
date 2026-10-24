@@ -63,13 +63,25 @@ class Client:
                 return message
         raise TimeoutError(f"no response for request {expected_id}")
 
-    def call(self, name: str, arguments: dict, timeout: float = 120.0) -> dict:
-        request_id = self.send("tools/call", {"name": name, "arguments": arguments})
+    def request(self, method: str, params: dict | None = None, timeout: float = 120.0) -> dict:
+        request_id = self.send(method, params)
         response = self.receive(request_id, timeout)
         if "error" in response:
             raise AssertionError(response["error"])
-        result = response["result"]
+        return response["result"]
+
+    def call(self, name: str, arguments: dict, timeout: float = 120.0) -> dict:
+        result = self.request(
+            "tools/call", {"name": name, "arguments": arguments}, timeout
+        )
         assert result.get("isError") is False, result
+        return json.loads(result["content"][0]["text"])
+
+    def call_error(self, name: str, arguments: dict, timeout: float = 120.0) -> dict:
+        result = self.request(
+            "tools/call", {"name": name, "arguments": arguments}, timeout
+        )
+        assert result.get("isError") is True, result
         return json.loads(result["content"][0]["text"])
 
     def close(self) -> None:
@@ -101,12 +113,55 @@ def main() -> int:
         assert init["result"]["serverInfo"]["name"] == "ida-stringdecrypt"
         client.notify("notifications/initialized")
 
-        tools_id = client.send("tools/list")
-        tools = client.receive(tools_id)["result"]["tools"]
+        tools = client.request("tools/list")["tools"]
         names = {tool["name"] for tool in tools}
-        assert {"scan_binary", "decrypt_blob", "list_schemes"} <= names, names
+        assert names == {
+            "scan_binary",
+            "analyze_binary",
+            "map_strings",
+            "get_string_context",
+            "find_strings",
+            "extract_iocs",
+            "decrypt_blob",
+            "list_schemes",
+        }, names
+        schemas = {tool["name"]: tool["inputSchema"] for tool in tools}
+        assert schemas["analyze_binary"]["properties"]["min_score"]["default"] == 60
+        assert schemas["extract_iocs"]["properties"]["min_score"]["default"] == 55
+        assert schemas["map_strings"]["properties"]["min_score"]["default"] == 30
 
-        metadata = client.call("list_schemes", {})
+        resources = client.request("resources/list")["resources"]
+        resource_uris = {item["uri"] for item in resources}
+        assert {
+            "stringdecrypt://schemes",
+            "stringdecrypt://tags",
+            "stringdecrypt://usage",
+        } <= resource_uris, resource_uris
+        tags_resource = client.request(
+            "resources/read", {"uri": "stringdecrypt://tags"}
+        )["contents"][0]
+        tags_payload = json.loads(tags_resource["text"])
+        assert "injection" in tags_payload["tags"], tags_payload
+        assert "url" in tags_payload["entity_types"], tags_payload
+
+        prompts = client.request("prompts/list")["prompts"]
+        assert {item["name"] for item in prompts} == {"triage_binary"}, prompts
+        prompt = client.request(
+            "prompts/get",
+            {
+                "name": "triage_binary",
+                "arguments": {"path": FIXTURE, "focus": "network"},
+            },
+        )
+        prompt_text = prompt["messages"][0]["content"]["text"]
+        assert FIXTURE in prompt_text, prompt_text
+        assert "network" in prompt_text, prompt_text
+
+        scheme_result = client.request(
+            "tools/call", {"name": "list_schemes", "arguments": {}}
+        )
+        assert "structuredContent" in scheme_result, scheme_result
+        metadata = json.loads(scheme_result["content"][0]["text"])
         assert metadata["ok"] is True
         assert {item["name"] for item in metadata["schemes"]} >= {"xor", "aes", "des"}
 
@@ -125,6 +180,69 @@ def main() -> int:
         plaintexts = {item["plaintext"] for item in scan["results"]}
         assert "https://example.com/api/v1" in plaintexts, plaintexts
         assert "http://example.com/api" in plaintexts, plaintexts
+        assert any("url" in item["tags"] for item in scan["results"]), scan["results"]
+
+        analysis = client.call("analyze_binary", {"path": FIXTURE})
+        assert analysis["ok"] is True, analysis
+        assert analysis["stats"]["matched"] >= 2, analysis["stats"]
+        assert analysis["findings"]["tag_counts"].get("url", 0) >= 2, analysis
+        assert analysis["notable_strings"], analysis
+        notable_id = analysis["notable_strings"][0]["id"]
+
+        page_one = client.call(
+            "map_strings",
+            {"path": FIXTURE, "tags": ["network"], "limit": 1},
+        )
+        assert page_one["ok"] is True, page_one
+        assert page_one["stats"]["matched"] == 2, page_one["stats"]
+        assert page_one["stats"]["returned"] == 1, page_one["stats"]
+        assert page_one["stats"]["next_offset"] == 1, page_one["stats"]
+        assert page_one["cache"]["hit"] is True, page_one["cache"]
+
+        page_two = client.call(
+            "map_strings",
+            {"path": FIXTURE, "tags": ["network"], "limit": 1, "offset": 1},
+        )
+        assert page_two["stats"]["returned"] == 1, page_two["stats"]
+        assert page_two["stats"]["next_offset"] is None, page_two["stats"]
+        assert page_two["strings"][0]["id"] != page_one["strings"][0]["id"]
+
+        context = client.call(
+            "get_string_context", {"path": FIXTURE, "id": notable_id}
+        )
+        assert context["ok"] is True, context
+        assert context["match"]["method"] == "id", context["match"]
+        references = context["context"]["possible_references"]
+        assert references["rip_relative_count"] >= 1, references
+        assert any(
+            item["instruction"] == "lea" for item in references["items"]
+        ), references
+        assert context["context"]["nearby_strings"], context["context"]
+
+        found = client.call(
+            "find_strings", {"path": FIXTURE, "query": "example.com"}
+        )
+        assert found["ok"] is True, found
+        assert found["stats"]["matched"] == 2, found["stats"]
+
+        iocs = client.call("extract_iocs", {"path": FIXTURE})
+        assert iocs["ok"] is True, iocs
+        assert iocs["counts"]["url"] == 2, iocs["counts"]
+        assert iocs["counts"]["domain"] == 1, iocs["counts"]
+
+        defanged = client.call(
+            "extract_iocs", {"path": FIXTURE, "types": ["url"], "defang": True}
+        )
+        assert any(
+            item.get("defanged") == "hxxps://example[.]com/api/v1"
+            for item in defanged["iocs"]["url"]
+        ), defanged["iocs"]
+
+        error = client.call_error(
+            "map_strings", {"path": FIXTURE, "tags": ["not-a-real-tag"]}
+        )
+        assert error["ok"] is False, error
+        assert "unknown tag" in error["error"], error
 
         plain = b"https://example.com/api/v1"
         cipher = bytes(value ^ 0x5A for value in plain)
@@ -140,6 +258,26 @@ def main() -> int:
         assert blob["ok"] is True, blob
         blob_plaintexts = {item["plaintext"] for item in blob["results"]}
         assert plain.decode() in blob_plaintexts, blob_plaintexts
+
+        old_client = Client()
+        try:
+            old_init = old_client.request(
+                "initialize",
+                {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "clientInfo": {"name": "smoke-test-old", "version": "1.0"},
+                },
+            )
+            assert old_init["protocolVersion"] == "2024-11-05", old_init
+            old_client.notify("notifications/initialized")
+            old_result = old_client.request(
+                "tools/call", {"name": "list_schemes", "arguments": {}}
+            )
+            assert "structuredContent" not in old_result, old_result
+            assert json.loads(old_result["content"][0]["text"])["ok"] is True
+        finally:
+            old_client.close()
 
         config = subprocess.run(
             [sys.executable, SERVER, "--print-config", "--config-style", "opencode"],
@@ -157,6 +295,10 @@ def main() -> int:
         print("MCP smoke test PASS")
         print(f"  tools: {', '.join(sorted(names))}")
         print(f"  scan results: {scan['stats']['results']}")
+        print(f"  analysis matches: {analysis['stats']['matched']}")
+        print(f"  map page: {page_one['stats']}")
+        print(f"  context refs: {references['count']}")
+        print(f"  IOC counts: {iocs['counts']}")
         print(f"  blob results: {len(blob['results'])}")
         print(f"  config launcher: {server_config['command'][1]}")
         return 0

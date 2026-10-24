@@ -7,6 +7,7 @@ sections/segments, image base, entry point and (for PE) imports.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import struct
 from dataclasses import dataclass, field
@@ -133,6 +134,7 @@ class BinaryImage:
     imports: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     size_of_headers: int = 0
+    sha256: str = ""
 
     # ------------------------------------------------------------------
     # Address translation
@@ -197,6 +199,7 @@ class BinaryImage:
             "image_base": f"0x{self.image_base:x}",
             "entry": f"0x{self.entry:x}",
             "size": len(self.data),
+            "sha256": self.sha256,
             "sections": [section.to_dict() for section in self.sections],
             "imports": self.imports,
             "warnings": self.warnings,
@@ -523,11 +526,15 @@ def load_binary(path: str) -> BinaryImage:
         data = handle.read()
     if not data:
         raise BinaryParseError("file is empty")
+    digest = hashlib.sha256(data).hexdigest()
     if data.startswith(b"MZ"):
-        return _parse_pe(path, data)
-    if data.startswith(b"\x7fELF"):
-        return _parse_elf(path, data)
-    raise BinaryParseError("not a native PE or ELF image")
+        image = _parse_pe(path, data)
+    elif data.startswith(b"\x7fELF"):
+        image = _parse_elf(path, data)
+    else:
+        raise BinaryParseError("not a native PE or ELF image")
+    image.sha256 = digest
+    return image
 
 
 def _overlay_sections(image: BinaryImage) -> list[Section]:

@@ -8,6 +8,7 @@ keyed ciphers against plausible key material.
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass, field
 from typing import Callable, Iterable
 
@@ -127,6 +128,7 @@ class ScanConfig:
     force_heavy: bool = False
     max_entropy_blobs: int = 2048
     custom_dirs: list[str] = field(default_factory=list)
+    deadline: float | None = None  # time.monotonic() deadline for bounded scans
 
     user_keys: list[bytes] = field(default_factory=list)
     user_ivs: list[bytes] = field(default_factory=list)
@@ -202,10 +204,20 @@ class StringDecryptEngine:
         self._rc4_keys: list[bytes] = []
         self._aes_ivs: list[tuple[str, bytes]] = []
         self._des_ivs: list[tuple[str, bytes]] = []
+        self._xorstr_keys: list[bytes] = []
+        self.expired = False
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
+    def _expired(self) -> bool:
+        if self.expired:
+            return True
+        deadline = self.config.deadline
+        if deadline is not None and time.monotonic() >= deadline:
+            self.expired = True
+        return self.expired
+
     def scan_candidates(
         self,
         candidates: Iterable[Candidate],
@@ -225,7 +237,7 @@ class StringDecryptEngine:
         results: list[ScanResult] = []
         total = len(candidates)
         for index, candidate in enumerate(candidates):
-            if cancel and cancel():
+            if self._expired() or (cancel and cancel()):
                 break
             results.extend(self.scan_candidate(candidate))
             if progress:
@@ -236,7 +248,7 @@ class StringDecryptEngine:
         return results[:self.config.max_total_results]
 
     def scan_candidate(self, candidate: Candidate) -> list[ScanResult]:
-        if not candidate.raw or len(candidate.raw) < self.config.min_length:
+        if self._expired() or not candidate.raw or len(candidate.raw) < self.config.min_length:
             return []
         if len(candidate.raw) > self.config.max_input_length:
             return []
@@ -309,7 +321,7 @@ class StringDecryptEngine:
     # Cheap transforms
     # ------------------------------------------------------------------
     def _analyze_cheap(self, data: bytes, prefix: str, depth: int) -> None:
-        if depth > self.config.max_pipeline_depth:
+        if depth > self.config.max_pipeline_depth or self._expired():
             return
         if len(data) < 2 or len(data) > self.config.max_input_length:
             return
@@ -353,6 +365,8 @@ class StringDecryptEngine:
 
         if self.config.enable_xor:
             for key in range(256):
+                if (key & 31) == 0 and self._expired():
+                    return
                 out = schemes.xor_single(data, key)
                 add_result(out, "xor", bytes([key]), prefix + f"xor(0x{key:02x})")
                 self._nested_base64(
@@ -369,6 +383,7 @@ class StringDecryptEngine:
                 self.config.key_material,
                 self.config.cribs,
                 statistical=statistical,
+                static_keys=self._xorstr_keys,
             ):
                 if len(key) <= 1:
                     continue
@@ -383,11 +398,15 @@ class StringDecryptEngine:
 
         if self.config.enable_add:
             for key in range(256):
+                if (key & 31) == 0 and self._expired():
+                    return
                 out = schemes.add_bytes(data, key)
                 add_result(out, "add", bytes([key]), prefix + f"add(0x{key:02x})")
 
         if self.config.enable_sub:
             for key in range(256):
+                if (key & 31) == 0 and self._expired():
+                    return
                 out = schemes.sub_bytes(data, key)
                 add_result(out, "sub", bytes([key]), prefix + f"sub(0x{key:02x})")
 
@@ -406,7 +425,7 @@ class StringDecryptEngine:
         *,
         require_strong: bool = False,
     ) -> None:
-        if depth >= self.config.max_pipeline_depth:
+        if depth >= self.config.max_pipeline_depth or self._expired():
             return
         if not self.config.enable_base64 or not schemes.is_base64_candidate(data):
             return
@@ -437,11 +456,11 @@ class StringDecryptEngine:
         return entropy >= 3.1 and printable < 0.9
 
     def _analyze_heavy(self, data: bytes, prefix: str) -> None:
-        if len(data) > 4096:
+        if len(data) > 4096 or self._expired():
             return
         if self.config.enable_rc4:
             for key in self._rc4_keys:
-                if self._cipher_ops >= self.config.max_cipher_ops:
+                if self._cipher_ops >= self.config.max_cipher_ops or self._expired():
                     return
                 self._cipher_ops += 1
                 out = schemes.rc4_decrypt(data, key)
@@ -452,6 +471,8 @@ class StringDecryptEngine:
 
         if self.config.enable_aes:
             for size_label, key in self._aes_keys:
+                if self._expired():
+                    return
                 for mode in ("ECB", "CBC"):
                     if self._cipher_ops >= self.config.max_cipher_ops:
                         return
@@ -477,6 +498,8 @@ class StringDecryptEngine:
 
         if self.config.enable_des:
             for size_label, key in self._des_keys:
+                if self._expired():
+                    return
                 for mode in ("ECB", "CBC"):
                     if self._cipher_ops >= self.config.max_cipher_ops:
                         return
@@ -513,7 +536,7 @@ class StringDecryptEngine:
         iv: bytes = b"",
         min_score: float | None = None,
     ) -> None:
-        if not data or len(data) < 2:
+        if not data or len(data) < 2 or self._expired():
             return
         if not _looks_textual(data):
             return
@@ -560,6 +583,7 @@ class StringDecryptEngine:
         if self.config.enable_custom:
             custom.load_decoders(self.config.custom_dirs)
         material = keys.rank_material(self.config.key_material)
+        self._xorstr_keys = keys.repeating_xor_static(material)
         self._aes_keys = keys.aes_keys(self.config.user_keys, material)[:self.config.max_cipher_keys]
         self._des_keys = keys.des_keys(self.config.user_keys, material)[:self.config.max_cipher_keys]
         self._rc4_keys = keys.rc4_keys(self.config.user_keys, material, limit=self.config.max_cipher_keys)

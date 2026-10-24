@@ -16,6 +16,17 @@ from .bytescan import printable_ratio
 MAX_MATERIAL = 4096
 MAX_KEY_LENGTH = 64
 
+# Translation tables for the fast statistical XOR-key recovery.  Each table
+# maps a ciphertext byte to 1 when (byte ^ candidate) is printable.  Doing this
+# in bytes.translate() keeps the hot loop in C instead of Python.
+_XOR_PRINTABLE = tuple(
+    bytes(
+        1 if (0x20 <= (value ^ candidate) <= 0x7E or (value ^ candidate) in (9, 10, 13)) else 0
+        for value in range(256)
+    )
+    for candidate in range(256)
+)
+
 
 DEFAULT_CRIBS = [
     b"http://",
@@ -266,12 +277,33 @@ def iv_candidates(user_ivs: Iterable[bytes], material: Iterable[bytes], size: in
     return _dedupe_pairs(pairs)
 
 
+def repeating_xor_static(
+    material: Iterable[bytes],
+    *,
+    limit: int = 192,
+) -> list[bytes]:
+    """Rank once-per-scan repeating-XOR key material.
+
+    The engine calls :func:`repeating_xor_keys` for every candidate.  Ranking
+    and sorting thousands of material values on every call dominated scan time,
+    so the static part is prepared once and reused.
+    """
+    values = [
+        value
+        for value in merge_material(material, limit=MAX_MATERIAL)
+        if 1 < len(value) <= MAX_KEY_LENGTH
+    ]
+    values.sort(key=lambda value: (-material_rank(value), len(value), value))
+    return values[:max(1, int(limit))]
+
+
 def repeating_xor_keys(
     data: bytes,
     material: Iterable[bytes],
     cribs: Iterable[bytes] | None = None,
     max_keys: int = 96,
     statistical: bool = True,
+    static_keys: Iterable[bytes] | None = None,
 ) -> list[bytes]:
     keys: list[bytes] = []
     seen: set[bytes] = set()
@@ -282,7 +314,7 @@ def repeating_xor_keys(
         seen.add(key)
         keys.append(key)
 
-    for key in material:
+    for key in (static_keys if static_keys is not None else material):
         if 1 < len(key) <= MAX_KEY_LENGTH:
             add(key)
 
@@ -303,17 +335,17 @@ def repeating_xor_keys(
         max_len = min(6, len(data) // 3)
         for key_len in range(2, max_len + 1):
             key = bytearray()
-            for column in range(key_len):
+            for column_index in range(key_len):
+                column = data[column_index::key_len]
+                total = len(column)
+                if not total:
+                    key.append(0)
+                    continue
                 best_key = 0
                 best_value = -1.0
                 for candidate in range(256):
-                    good = total = 0
-                    for value in data[column::key_len]:
-                        decoded = value ^ candidate
-                        total += 1
-                        if 0x20 <= decoded <= 0x7E or decoded in (9, 10, 13):
-                            good += 1
-                    score = (good / total) if total else 0.0
+                    good = column.translate(_XOR_PRINTABLE[candidate]).count(1)
+                    score = good / total
                     # Prefer printable key bytes when plaintext score ties.
                     if 0x20 <= candidate <= 0x7E:
                         score += 0.002

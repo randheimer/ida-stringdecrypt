@@ -18,8 +18,14 @@ dependency. AES, DES and RC4 are implemented in `stringdecrypt/purecrypto/`.
   cribs
 - Confidence scoring with `[StringDecrypt]` comments at a configurable threshold
 - Complete CLI with stable JSON/JSONL output for automation and AI agents
+- String map: stable IDs, address/section/file-offset mapping, nearby strings,
+  absolute-pointer and x86-64 RIP-relative code references
+- IOC and behavior intelligence: URLs, domains, IPs, paths, registry keys,
+  wallets, hashes and behavior tags with an aggregated risk level
 - Dependency-free MCP stdio server (`mcp_server.py`) for AI agents, usable next
   to the official IDA 9.5 MCP server
+- SHA-256-keyed scan cache and per-scan timeouts so AI clients can explore a
+  file without rescanning it for every question
 - One-command MCP registration for installed AI clients (`install_mcp.py`)
 - Interactive installer that detects IDA and AI clients, with a guided
   uninstall and non-interactive flags (`install.py`)
@@ -162,12 +168,21 @@ python -m stringdecrypt.cli scan sample.exe --keys "MyKey,hex:00112233"
 python -m stringdecrypt.cli scan sample.exe --ivs "0000000000000000"
 python -m stringdecrypt.cli scan sample.exe --cribs "https://"
 python -m stringdecrypt.cli scan sample.exe --custom-dir .\my_decoders
+python -m stringdecrypt.cli scan sample.exe --timeout 90
+python -m stringdecrypt.cli scan sample.exe --no-intel
 ```
 
 CLI defaults: minimum score 60, minimum length 5, 2000 results, 30000
 candidates, 2048 entropy blobs. Use `--include-code` to extract strings from
-executable sections, `--force-heavy` to run RC4/AES/DES on every candidate, and
-`--no-custom` to disable custom decoders.
+executable sections, `--force-heavy` to run RC4/AES/DES on every candidate,
+`--no-custom` to disable custom decoders, and `--no-intel` to skip IOC/behavior
+enrichment. `--timeout SECONDS` stops the scan with partial results; the JSON
+sets `stats.timed_out` to `true`.
+
+Each result carries a stable `id`, `tags`, `entities` and a `risk` level. The
+top level contains the image `sha256` and an `intel` summary with tag, entity
+and risk counts. Stable IDs are derived from the address and plaintext, so they
+remain valid for later `map_strings`/`get_string_context` calls.
 
 ### JSON schema
 
@@ -179,6 +194,7 @@ executable sections, `--force-heavy` to run RC4/AES/DES on every candidate, and
   "version": "1.1.0",
   "ok": true,
   "file": "C:\\samples\\sample.exe",
+  "sha256": "9f2c...e1",
   "image": {
     "format": "PE",
     "machine": "AMD64",
@@ -192,7 +208,9 @@ executable sections, `--force-heavy` to run RC4/AES/DES on every candidate, and
     "max_input_length": 8192,
     "max_results": 2000,
     "schemes": {"base64": true, "xor": true, "xorstr": true, "aes": true},
-    "force_heavy": false
+    "force_heavy": false,
+    "enrich": true,
+    "timeout_seconds": null
   },
   "stats": {
     "candidates": 1025,
@@ -200,10 +218,19 @@ executable sections, `--force-heavy` to run RC4/AES/DES on every candidate, and
     "entropy_blobs": 138,
     "results": 105,
     "schemes": {"xor": 23, "xorstr": 71, "aes": 1},
-    "elapsed_seconds": 88.8
+    "elapsed_seconds": 88.8,
+    "total_elapsed_seconds": 89.1,
+    "timed_out": false
+  },
+  "intel": {
+    "tagged_strings": 41,
+    "tags": {"url": 12, "network": 12, "http": 10, "domain": 12},
+    "entity_types": {"url": 12, "domain": 12},
+    "risks": {"info": 64, "low": 41}
   },
   "results": [
     {
+      "id": "s_7d08db90826b",
       "address": "0x140002080",
       "ea": 5368713344,
       "file_offset": 2176,
@@ -222,6 +249,12 @@ executable sections, `--force-heavy` to run RC4/AES/DES on every candidate, and
       "text_encoding": "latin-1",
       "details": "input=26b output=26b",
       "confidence": "high",
+      "tags": ["url", "network", "http", "domain", "dns"],
+      "entities": {
+        "url": ["https://example.com/api/v1"],
+        "domain": ["example.com"]
+      },
+      "risk": "low",
       "section": ".rdata",
       "source": "ida"
     }
@@ -232,7 +265,8 @@ executable sections, `--force-heavy` to run RC4/AES/DES on every candidate, and
 On a parse error the command prints `{"ok": false, "error": "..."}` for JSON
 output and exits with code 2. `jsonl` emits one metadata line followed by one
 line per result; the result lines are the same objects as above without the
-top-level fields.
+top-level fields. JSON/JSONL output is UTF-8; the CLI reconfigures stdout on
+Windows so recovered non-ASCII plaintext cannot break the JSON stream.
 
 Confidence labels: `high` >= 85, `medium` >= 70, `low` >= 55, otherwise
 `very_low`.
@@ -248,12 +282,30 @@ Tools:
 
 | Tool | Purpose |
 | --- | --- |
-| `scan_binary` | Scan a PE/ELF path; keys are guessed automatically. Returns addresses, schemes, keys, scores and plaintext. |
+| `scan_binary` | Scan a PE/ELF path; keys are guessed automatically. Returns addresses, sections, file offsets, stable IDs, schemes, keys, scores, tags and plaintext. |
+| `analyze_binary` | Triage summary for an unknown file: file metadata, tag/risk/entity counts, notable strings, network IOCs, suspicious imports and suggested next calls. |
+| `map_strings` | Paginated, filterable string map. Filter by tag, entity type, scheme, risk, score or plaintext; sort by address, score or risk. |
+| `get_string_context` | Resolve one string by ID, address or text. Returns nearby strings, absolute-pointer and RIP-relative code references, related imports, a raw hex window and an IDA hand-off address. |
+| `find_strings` | Search recovered plaintext by substring or regular expression, with the same tag/entity/scheme filters. |
+| `extract_iocs` | Aggregate URLs, domains, IPs, emails, paths, registry keys, wallets, hashes and filenames, keeping the string IDs and addresses that produced each one. |
 | `decrypt_blob` | Try automatic decryption on one hex/Base64/text ciphertext blob. |
-| `list_schemes` | Return supported schemes, encodings, protocol versions and server metadata. |
+| `list_schemes` | Return supported schemes, encodings, tag/entity vocabulary, limits, protocol versions and server metadata. |
+
+Three MCP resources are available:
+
+| URI | Content |
+| --- | --- |
+| `stringdecrypt://schemes` | Schemes, encodings, tag definitions, entity types, limits and cache stats. |
+| `stringdecrypt://tags` | Tag definitions, risk levels, entity types and the stable-ID format. |
+| `stringdecrypt://usage` | Recommended analyze → map → context workflow. |
+
+A `triage_binary` prompt accepts `path` and an optional `focus` (for example
+`network`, `persistence` or `credentials`) and produces a triage request for the
+agent.
 
 The server speaks MCP protocol versions `2025-06-18`, `2025-03-26` and
-`2024-11-05`, and honors read-only tool annotations.
+`2024-11-05`, and honors read-only tool annotations. `structuredContent` is
+emitted for `2025-06-18`; older clients receive the same payload as JSON text.
 
 ### Automatic setup for AI clients
 
@@ -372,17 +424,54 @@ VS Code `.vscode/mcp.json`:
 
 Restart or reload the MCP client after editing its configuration. OpenCode V2
 watches its configuration and reloads MCP servers automatically. The client
-should list `scan_binary`, `decrypt_blob` and `list_schemes`.
+should list all eight tools described above.
 
-### Example agent workflow
+### Recommended triage workflow
+
+The canonical scan is cached, so these calls are cheap after the first one:
 
 ```text
-scan_binary({"path": "C:\\samples\\sample.exe", "min_score": 70})
+analyze_binary({"path": "C:\\samples\\sample.exe"})
+map_strings({"path": "C:\\samples\\sample.exe",
+             "tags": ["network", "http"], "tag_mode": "all",
+             "sort": "risk", "limit": 50})
+get_string_context({"path": "C:\\samples\\sample.exe", "id": "s_7d08db90826b"})
+extract_iocs({"path": "C:\\samples\\sample.exe", "defang": true})
+find_strings({"path": "C:\\samples\\sample.exe",
+              "query": "password|token", "regex": true})
 ```
 
-The result is the same JSON payload as `--format json`, so each hit includes
-`address`, `ea`, `file_offset`, `scheme`, `key`, `pipeline`, `plaintext`,
-`score` and `confidence`. Useful options:
+`analyze_binary` is the best first call: it defaults to score 60, returns only
+the most notable strings, and suggests the next tool calls. Use a lower
+`min_score` (for example 30) when you need recall over precision.
+
+`map_strings` and `find_strings` default to score 30 and are paginated. Each
+string item contains `id`, `address`, `ea`, `file_offset`, `section`, `scheme`,
+`score`, `confidence`, `risk`, `tags`, `entities` and truncated `plaintext`.
+When `stats.next_offset` is not null, call the same tool again with that value
+as `offset`.
+
+Filters for `map_strings`/`find_strings`:
+
+| Argument | Default | Meaning |
+| --- | --- | --- |
+| `tags` | empty | Match behavior/content tags such as `network`, `http`, `persistence`, `injection`, `url` or `registry`. |
+| `tag_mode` | `any` | `any` or `all` of the requested tags. |
+| `entity_types` | empty | Require a URL, domain, IP, email, path, registry key, wallet, hash, filename, user agent, JWT, environment reference or named pipe. |
+| `schemes` | all | Filter by `base64,xor,xorstr,add,sub,rol,rc4,aes,des,custom`. |
+| `min_risk` | none | `info`, `low`, `medium` or `high`. |
+| `query`, `regex` | empty, false | Substring or regular-expression search on the plaintext. |
+| `sort` | `address` | `address`, `score` or `risk`. |
+| `offset`, `limit` | 0, 50 | Pagination; maximum page size is 500 (`find_strings` defaults to 30). |
+| `max_plaintext_chars` | 400 | Per-string plaintext truncation. |
+
+`analyze_binary` also accepts `notable_limit` (20), `max_iocs` (30) and
+`max_plaintext_chars` (300). `extract_iocs` accepts `types`, `min_score` (55),
+`limit_per_type` (100) and `defang` (false). `get_string_context` accepts one of
+`id`, `address` or `text`, plus `before`/`after` neighbor counts (3 each).
+
+`scan_binary` returns the same JSON payload as `--format json`, including
+`sha256`, stable IDs, tags, entities and risk. Its scan options:
 
 | Argument | Default | Meaning |
 | --- | --- | --- |
@@ -393,10 +482,48 @@ The result is the same JSON payload as `--format json`, so each hit includes
 | `heavy` | true | Set false to skip RC4/AES/DES for fast triage. |
 | `max_candidates` | 5000 | Lower for speed, raise for large binaries. |
 | `max_results` | 200 | Cap on returned hits (maximum 5000). |
+| `timeout_seconds` | 120 | Stop with partial results after this many seconds. |
+| `refresh` | false | Ignore the scan cache and rescan the file. |
 
 `decrypt_blob` accepts `data`, `data_encoding` (`hex`, `base64`, `text`,
 `latin-1`) plus the same scheme/key options, which is handy for a blob
-extracted by another tool.
+extracted by another tool. It defaults to score 60 and caps input at 64 KiB.
+
+### Tags, entities and risk
+
+Tags are conservative hints, not verdicts. Content tags describe what a string
+is (`url`, `domain`, `ip`, `email`, `path`, `registry`, `wallet`, `hash`,
+`filename`, `user_agent`, `jwt`, `environment`, `named_pipe`). Behavior tags
+describe what it may be used for (`network`, `http`, `dns`, `download`,
+`execution`, `command`, `persistence`, `credential`, `credential_theft`,
+`crypto`, `anti_debug`, `evasion`, `injection`, `process`, `privilege`,
+`lateral`, `wmi`, `exfiltration`, `ransomware`, `uac_bypass`, `sql`,
+`encoded`).
+
+Every string gets a risk level (`info`, `low`, `medium`, `high`) equal to the
+highest severity of its tags. `analyze_binary` aggregates these into tag, risk
+and entity counts. The complete machine-readable vocabulary is available from
+`list_schemes` and the `stringdecrypt://tags` resource.
+
+### Caching, limits and timeouts
+
+`scan_binary`, `analyze_binary`, `map_strings`, `find_strings`,
+`get_string_context` and `extract_iocs` share a process-local cache. The
+mapping/triage tools reuse one canonical scan at score 30 and filter afterwards,
+so `analyze_binary` followed by several `map_strings`/`get_string_context` calls
+does not rescan the file. Cache keys include the image SHA-256 and scan options;
+a changed file or `refresh: true` produces a fresh scan.
+
+- Maximum file size: 256 MiB.
+- Maximum page size: 500 strings.
+- Canonical mapping scan timeout: 90 seconds. `scan_binary` defaults to 120
+  seconds (range 1–600). A timed-out scan returns partial results and sets
+  `stats.timed_out`/`cache` information in the response.
+- `STRINGDECRYPT_CACHE=0` disables the cache. `STRINGDECRYPT_CACHE_ENTRIES`
+  (default 6) and `STRINGDECRYPT_CACHE_TTL` (default 900 seconds) bound memory
+  and entry age.
+- The cache is in memory only; the server never writes scan results to disk and
+  never patches the binary.
 
 ### Using it with the official IDA MCP
 
@@ -407,11 +534,13 @@ companion, not a replacement: register both under distinct names, for example
 
 Typical combined workflow:
 
-1. Use the official IDA MCP tools to inspect the target and locate suspicious
-   data references.
-2. Call `scan_binary` on the same file (or `decrypt_blob` on a specific blob).
-3. Feed a returned address back to the official IDA MCP tools to view the
-   surrounding code, xrefs or decompilation.
+1. Call `analyze_binary` on the target file for recovered strings, tags, IOCs
+   and import hints.
+2. Use `map_strings` or `find_strings` to narrow the list to a behavior or
+   indicator, then `get_string_context` for neighbors and code references.
+3. Feed the returned address to the official IDA MCP tools to view the
+   surrounding code, xrefs or decompilation. Use `extract_iocs` when you need a
+   deduplicated indicator list.
 
 The official IDA MCP documentation recommends disabling *competing IDA MCP
 servers* to avoid confusing the agent. This server does not connect to IDA or
@@ -427,11 +556,14 @@ delta before using an address there.
 ```powershell
 $env:PYTHONPATH = (Get-Location).Path
 python tests\smoke_mcp.py
+python tests\smoke_intel.py
 ```
 
-The smoke test initializes an MCP session, lists tools, scans the PE64 fixture,
-and decrypts a single XOR blob. The server also works with the official MCP
-Python SDK as a client.
+The MCP smoke test initializes sessions with both new and old protocol
+versions, lists tools/resources/prompts, scans the PE64 fixture, checks map
+pagination and cache hits, resolves a RIP-relative code reference, extracts
+IOCs and decrypts a single XOR blob. The server also works with the official
+MCP Python SDK as a client.
 
 ## Detection and scoring
 
@@ -472,15 +604,22 @@ template. See `custom_decoders/README.md` for the API.
 - Scores are confidence estimates, not proof. Short or low-entropy strings can
   score moderately without being real decryptions. Review results before
   acting on them.
+- Tags and risk levels are heuristics derived from plaintext and imports. They
+  can miss context that only exists in code and can produce false positives on
+  ordinary library strings.
 - Printable data is analyzed conservatively to avoid reporting shifts of
   ordinary strings; some real decryptions of printable sources can be hidden.
 - No .NET/IL support; no automatic patching; no network access.
 - Large inputs are capped (8192 bytes per candidate by default). Nested
-  pipelines are limited to depth 2.
+  pipelines are limited to depth 2. The MCP mapping tools refuse files larger
+  than 256 MiB.
+- Code-reference mapping covers absolute pointer values and x86-64 RIP-relative
+  `LEA`/`MOV` operands. Other architectures and computed references are not
+  mapped; use the official IDA MCP server for full xrefs.
 - Scan time grows with the number of candidates and keyed-cipher operations.
   A typical 1,000-candidate native binary takes roughly 1–2 minutes with the
   default UI settings; reduce the candidate/heavy caps or disable schemes for
-  faster triage.
+  faster triage. MCP scans can be bounded with `timeout_seconds`.
 
 ## Development and tests
 
@@ -495,6 +634,7 @@ python tests\smoke_engine.py
 python tests\smoke_custom.py
 python tests\smoke_peelf.py
 python tests\smoke_mcp.py
+python tests\smoke_intel.py
 python tests\smoke_install_mcp.py
 python tests\smoke_install.py
 ```

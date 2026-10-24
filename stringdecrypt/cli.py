@@ -18,7 +18,7 @@ import time
 from collections import Counter
 from typing import Sequence
 
-from . import __version__, keys, peelf
+from . import __version__, intel, keys, peelf
 from .engine import ScanConfig, StringDecryptEngine
 
 
@@ -96,6 +96,7 @@ def build_parser() -> argparse.ArgumentParser:
     scan.add_argument("--no-des", action="store_true")
     scan.add_argument("--no-heavy", action="store_true", help="skip RC4/AES/DES")
     scan.add_argument("--no-entropy", action="store_true", help="do not scan high-entropy blobs")
+    scan.add_argument("--no-intel", action="store_true", help="skip IOC/behavior tags in the output")
     scan.add_argument("--include-code", action="store_true", help="also extract strings from executable sections")
     scan.add_argument("--force-heavy", action="store_true", help="run keyed ciphers on every candidate")
     scan.add_argument("--keys", action="append", help="key(s), comma separated; prefixes ascii:, hex:, 0x")
@@ -107,6 +108,14 @@ def build_parser() -> argparse.ArgumentParser:
     scan.add_argument("--custom-dir", action="append", help="extra directory with custom decoder modules")
     scan.add_argument("--no-custom", action="store_true")
     scan.add_argument("--max-entropy-blobs", type=int, default=2048)
+    scan.add_argument(
+        "--timeout",
+        dest="timeout_seconds",
+        type=float,
+        default=0,
+        metavar="SECONDS",
+        help="stop the scan with partial results after this many seconds (0 = no limit)",
+    )
     scan.add_argument("--quiet", action="store_true")
     scan.add_argument("--pretty", action="store_true", default=True)
     return parser
@@ -155,6 +164,12 @@ def _build_config(args: argparse.Namespace) -> ScanConfig:
 
 def _scan_file(path: str, args: argparse.Namespace) -> dict:
     started = time.time()
+    timeout_seconds = float(getattr(args, "timeout_seconds", 0) or 0)
+    # ScanConfig.deadline is monotonic; wall-clock time cannot be compared to
+    # time.monotonic().
+    deadline = time.monotonic() + timeout_seconds if timeout_seconds > 0 else None
+    enrich = not bool(getattr(args, "no_intel", False))
+
     image = peelf.load_binary(path)
     candidates = peelf.image_candidates(
         image,
@@ -166,44 +181,66 @@ def _scan_file(path: str, args: argparse.Namespace) -> dict:
     if len(candidates) > args.max_candidates:
         candidates = candidates[:args.max_candidates]
     config = _build_config(args)
+    config.deadline = deadline
 
     # Imports and section names are excellent key material; candidate strings
-    # are appended so the engine can try keys that literally appear in the file.
-    material = list(config.key_material)
+    # are appended as generators so a huge string table does not create a
+    # second material list before merge_material() hits its limit.
+    material_imports: list[bytes] = []
     for imported in image.imports:
-        material.append(imported.encode("latin-1", "ignore"))
+        material_imports.append(imported.encode("latin-1", "ignore"))
         for part in imported.replace("!", ".").split("."):
             if part:
-                material.append(part.encode("latin-1", "ignore"))
-    for section in image.sections:
-        if section.name:
-            material.append(section.name.encode("latin-1", "ignore"))
-    material.extend([candidate.raw for candidate in candidates if 1 <= len(candidate.raw) <= 64])
-    material.extend([
-        candidate.text.encode("latin-1", "ignore")
-        for candidate in candidates
-        if candidate.text
-    ])
-    config.key_material = keys.merge_material(material, limit=4096)
+                material_imports.append(part.encode("latin-1", "ignore"))
+    material_sections = [
+        section.name.encode("latin-1", "ignore")
+        for section in image.sections
+        if section.name
+    ]
+    config.key_material = keys.merge_material(
+        config.key_material,
+        material_imports,
+        material_sections,
+        (candidate.raw for candidate in candidates if 1 <= len(candidate.raw) <= 64),
+        (candidate.text.encode("latin-1", "ignore") for candidate in candidates if candidate.text),
+        limit=4096,
+    )
 
     engine = StringDecryptEngine(config)
     results = engine.scan_candidates(candidates)
     elapsed = time.time() - started
 
+    intel_tags: Counter[str] = Counter()
+    intel_entities: Counter[str] = Counter()
+    intel_risks: Counter[str] = Counter()
+    intel_tagged = 0
     output_results = []
     for result in results:
         data = result.to_dict()
+        data["id"] = intel.string_id(result.candidate.ea, result.plaintext)
         data["confidence"] = _confidence(result.score)
         data["section"] = result.candidate.segment
         data["source"] = result.candidate.source
+        if enrich:
+            intelligence = intel.analyze_text(result.plaintext)
+            data["tags"] = list(intelligence.tags)
+            data["entities"] = intelligence.entities_dict()
+            data["risk"] = intelligence.risk
+            if intelligence.tags:
+                intel_tagged += 1
+            intel_tags.update(intelligence.tags)
+            intel_entities.update(intelligence.entities.keys())
+            intel_risks[intelligence.risk] += 1
         output_results.append(data)
 
     scheme_counts = Counter(result.scheme for result in results)
-    return {
+    total_elapsed = time.time() - started
+    payload = {
         "tool": "ida-stringdecrypt",
         "version": __version__,
         "ok": True,
         "file": image.path,
+        "sha256": image.sha256,
         "image": image.to_dict(),
         "config": {
             "min_score": config.min_score,
@@ -223,6 +260,8 @@ def _scan_file(path: str, args: argparse.Namespace) -> dict:
                 "custom": config.enable_custom,
             },
             "force_heavy": config.force_heavy,
+            "enrich": enrich,
+            "timeout_seconds": timeout_seconds or None,
         },
         "stats": {
             "candidates": len(candidates),
@@ -231,9 +270,21 @@ def _scan_file(path: str, args: argparse.Namespace) -> dict:
             "results": len(results),
             "schemes": dict(sorted(scheme_counts.items())),
             "elapsed_seconds": round(elapsed, 3),
+            "total_elapsed_seconds": round(total_elapsed, 3),
+            "timed_out": bool(getattr(engine, "expired", False)),
         },
         "results": output_results,
     }
+    if enrich:
+        payload["intel"] = {
+            "tagged_strings": intel_tagged,
+            "tags": dict(intel_tags.most_common(50)),
+            "entity_types": dict(
+                sorted(intel_entities.items(), key=lambda item: (-item[1], item[0]))
+            ),
+            "risks": dict(sorted(intel_risks.items())),
+        }
+    return payload
 
 
 def scan_path(
@@ -255,6 +306,8 @@ def scan_path(
     force_heavy: bool = False,
     heavy: bool = True,
     custom: bool = True,
+    timeout_seconds: float | None = None,
+    enrich: bool = True,
 ) -> dict:
     """Programmatic equivalent of ``stringdecrypt scan --format json``.
 
@@ -281,7 +334,9 @@ def scan_path(
         no_des=False,
         no_heavy=not heavy,
         no_custom=not custom,
+        no_intel=not enrich,
         force_heavy=bool(force_heavy),
+        timeout_seconds=timeout_seconds or 0,
         schemes=[",".join(schemes)] if schemes else None,
         keys=list(keys or []),
         key_file=None,
@@ -312,9 +367,10 @@ def _print_text(payload: dict) -> None:
     print()
     for result in payload["results"]:
         key = f" key={result['key']}" if result.get("key") else ""
+        tags = f" [{'|'.join(result.get('tags', []))}]" if result.get("tags") else ""
         print(
             f"{result['address']:>12s} {result['scheme']:9s} {result['score']:6.2f} "
-            f"{result['confidence']:8s} {result['plaintext']!r}{key}"
+            f"{result['confidence']:8s} {result['plaintext']!r}{tags}{key}"
         )
     if not payload["results"]:
         print("(no results)")
@@ -323,6 +379,14 @@ def _print_text(payload: dict) -> None:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    # Windows consoles often default to cp1252, which cannot encode arbitrary
+    # recovered plaintext.  JSON output must stay valid UTF-8.
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, OSError, ValueError):
+        pass
     if args.command != "scan":
         parser.error("unknown command")
 

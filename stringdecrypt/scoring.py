@@ -8,6 +8,7 @@ garbage.
 from __future__ import annotations
 
 import re
+from functools import lru_cache
 
 from .bytescan import shannon_entropy
 
@@ -276,7 +277,7 @@ def _punctuation_penalty(text: str, *, url_like: bool, json_like: bool, path_lik
     return penalty
 
 
-def score_text(text: str, *, original: bool = False) -> float:
+def _score_text(text: str, *, original: bool = False) -> float:
     if not text:
         return 0.0
 
@@ -472,6 +473,20 @@ def score_text(text: str, *, original: bool = False) -> float:
     return max(0.0, min(100.0, score))
 
 
+@lru_cache(maxsize=8192)
+def _score_text_cached(text: str, original: bool) -> float:
+    return _score_text(text, original=original)
+
+
+def score_text(text: str, *, original: bool = False) -> float:
+    """Score plaintext, caching short strings that repeat across candidates."""
+    if not text:
+        return 0.0
+    if len(text) <= 512:
+        return _score_text_cached(text, original)
+    return _score_text(text, original=original)
+
+
 def _decode_variants(data: bytes) -> list[tuple[str, str]]:
     variants: list[tuple[str, str]] = []
 
@@ -509,8 +524,7 @@ def _decode_variants(data: bytes) -> list[tuple[str, str]]:
     return unique
 
 
-def score_bytes(data: bytes, *, original: bool = False) -> tuple[float, str, str]:
-    """Return (score, best_text, encoding)."""
+def _score_bytes_uncached(data: bytes, *, original: bool = False) -> tuple[float, str, str]:
     if not data:
         return 0.0, "", "raw"
 
@@ -527,6 +541,20 @@ def score_bytes(data: bytes, *, original: bool = False) -> tuple[float, str, str
             best_text = text
             best_encoding = encoding
     return max(0.0, min(100.0, best_score)), best_text, best_encoding
+
+
+@lru_cache(maxsize=4096)
+def _score_bytes_cached(data: bytes, original: bool) -> tuple[float, str, str]:
+    return _score_bytes_uncached(data, original=original)
+
+
+def score_bytes(data: bytes, *, original: bool = False) -> tuple[float, str, str]:
+    """Return (score, best_text, encoding)."""
+    if not data:
+        return 0.0, "", "raw"
+    if len(data) <= 512:
+        return _score_bytes_cached(data, original)
+    return _score_bytes_uncached(data, original=original)
 
 
 def score_hex_bytes(data: bytes) -> float:
