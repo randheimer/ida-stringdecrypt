@@ -1,0 +1,37 @@
+{
+  "path": "C:\\Users\\Administrator\\Documents\\Standardprojekt\\ida_stringdecrypt\\tests\\ida_test_pe.exe",
+  "image_base": 5368709120,
+  "addresses": {
+    "plain": 5368717312,
+    "base64": 5368717376,
+    "xor": 5368717440,
+    "rc4": 5368717472,
+    "aes": 5368717504,
+    "des": 5368717536,
+    "rc4_key": 5368717568,
+    "aes_key": 5368717600,
+    "des_key": 5368717632,
+    "path": 5368717696
+  },
+  "plaintexts": {
+    "plain": "Hello from the string decryptor!",
+    "base64": "http://example.com/api",
+    "xor": "https://example.com/api/v1",
+    "rc4": "SecretConfigValue",
+    "aes": "This is an AES encrypted message",
+    "des": "des test payload",
+    "path": "C:\\Windows\\System32\\kernel32.dll"
+  },
+  "keys": {
+    "xor": "5a",
+    "rc4": "SecretKey001",
+    "aes": "AESKEY0000000000",
+    "des": "DESK0000"
+  },
+  "cipher_lengths": {
+    "xor": 26,
+    "rc4": 17,
+    "aes": 32,
+    "des": 16
+  }
+}

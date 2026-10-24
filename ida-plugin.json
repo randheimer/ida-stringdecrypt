@@ -1,0 +1,26 @@
+{
+  "IDAMetadataDescriptorVersion": 1,
+  "plugin": {
+    "name": "ida-stringdecrypt",
+    "entryPoint": "ida_stringdecrypt_plugin.py",
+    "version": "1.0.0",
+    "description": "Automatic native string and ciphertext decryptor. Tries XOR, XorStr, Add/Sub/Rol, Base64, RC4, AES and DES, scores the plaintext, and optionally adds non-destructive comments.",
+    "idaVersions": ">=9.0",
+    "requiresPython": ">=3.9",
+    "categories": [
+      "malware-analysis",
+      "deobfuscation",
+      "api-scripting-and-automation"
+    ],
+    "keywords": [
+      "strings",
+      "decryption",
+      "xor",
+      "rc4",
+      "aes",
+      "des",
+      "base64",
+      "malware"
+    ]
+  }
+}
