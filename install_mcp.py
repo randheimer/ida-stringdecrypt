@@ -610,14 +610,14 @@ def apply_client(
     return result
 
 
-def _client_by_key(clients: Sequence[Client], key: str) -> Client:
+def client_by_key(clients: Sequence[Client], key: str) -> Client:
     for client in clients:
         if client.key == key:
             return client
     raise KeyError(key)
 
 
-def _print_table(results: Sequence[dict]) -> None:
+def print_results(results: Sequence[dict]) -> None:
     if not results:
         print("No clients selected.")
         return
@@ -635,7 +635,7 @@ def _print_table(results: Sequence[dict]) -> None:
             print(f"       backup: {item['backup']}")
 
 
-def _status_results(clients: Sequence[Client], name: str, command: Sequence[str]) -> list[dict]:
+def status_results(clients: Sequence[Client], name: str, command: Sequence[str]) -> list[dict]:
     results = []
     for client in clients:
         status, path = _inspect(client, name, command)
@@ -697,7 +697,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     clients = build_clients()
     if args.client:
         try:
-            selected = [_client_by_key(clients, key.lower()) for key in args.client]
+            selected = [client_by_key(clients, key.lower()) for key in args.client]
         except KeyError as error:
             parser.error(f"unknown client {error.args[0]!r}; choose from: {', '.join(c.key for c in clients)}")
     elif args.auto:
@@ -714,7 +714,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     command = [str(python_path.resolve()), str(launcher_path.resolve())]
 
     if not args.auto and not args.client:
-        results = _status_results(selected, args.name, command)
+        results = status_results(selected, args.name, command)
         if args.as_json:
             print(json.dumps({"ok": True, "python": command[0], "launcher": command[1], "clients": results}, indent=2))
             return 0
@@ -722,7 +722,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"  Python:   {command[0]}")
         print(f"  Launcher: {command[1]}")
         print()
-        _print_table(results)
+        print_results(results)
         detected = sum(1 for item in results if item["detected"])
         print()
         print(f"Detected {detected} client(s).")
@@ -771,7 +771,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"  Python:   {command[0]}")
         print(f"  Launcher: {command[1]}")
         print()
-        _print_table(results)
+        print_results(results)
         print()
         changed = sum(1 for item in results if item["action"] not in ("none", "unchanged"))
         errors = sum(1 for item in results if item["status"].startswith("error:"))

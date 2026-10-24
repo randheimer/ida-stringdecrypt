@@ -21,6 +21,8 @@ dependency. AES, DES and RC4 are implemented in `stringdecrypt/purecrypto/`.
 - Dependency-free MCP stdio server (`mcp_server.py`) for AI agents, usable next
   to the official IDA 9.5 MCP server
 - One-command MCP registration for installed AI clients (`install_mcp.py`)
+- Interactive installer that detects IDA and AI clients, with a guided
+  uninstall and non-interactive flags (`install.py`)
 - Pluggable custom decoders (`custom_decoders/*.py`)
 - IDA 9.5 plugin UI (PySide6), press **Ctrl-Shift-D**
 
@@ -33,30 +35,74 @@ Requirements: IDA Professional 9.5 (IDA 9.0+ metadata is declared) and the
 Python environment shipped with IDA for the UI. The CLI works with a normal
 Python 3.9+ installation.
 
-From this directory:
+From this directory, run the interactive wizard:
 
 ```powershell
 python install.py
 ```
 
-The installer copies the plugin to:
+The wizard asks what to do:
+
+```text
+  1) IDA plugin only
+  2) MCP server for AI clients only
+  3) Both
+  4) Uninstall
+  5) Exit
+```
+
+It then:
+
+1. detects IDA user plugin directories and IDA installations
+   (`IDAUSR`, `%APPDATA%\Hex-Rays\IDA Pro`, `~/.idapro`, the Windows registry
+   uninstall entries and `Program Files\IDA*`);
+2. asks for an IDA plugin or installation path when no location is found;
+3. lists the AI clients installed on this machine and asks whether to
+   configure all of them (or selected ones);
+4. shows the final plan and asks for confirmation.
+
+On Windows the default target is:
 
 ```text
 %APPDATA%\Hex-Rays\IDA Pro\plugins\ida_stringdecrypt\
 ```
 
+The installer keeps existing user files in the installed `custom_decoders`
+directory.
+
+### Non-interactive installation
+
+```powershell
+python install.py --all --yes             # IDA plugin + detected AI clients
+python install.py --ida-only --yes
+python install.py --mcp-only --yes
+python install.py --mcp-only --mcp-client antigravity --mcp-client claude-code --yes
+python install.py --all --uninstall --yes
+```
+
 Other options:
 
 ```powershell
-python install.py --dry-run              # show what would be copied
-python install.py --target "D:\ida\plugins"
+python install.py --ida-only --target "D:\ida\plugins"
+python install.py --ida-only --target "C:\Program Files\IDA Professional 9.5"
+python install.py --dry-run              # preview the IDA plugin copy
+python install.py --interactive --dry-run
 python install.py --no-compile
-python install.py --uninstall
+python install.py --allow-jsonc          # MCP JSONC files (comments are lost)
+python install.py --no-backup            # no MCP .bak-* files
 ```
 
-Restart IDA after installation. Open **Edit > Plugins > String Decryptor** or
-press **Ctrl-Shift-D**. The installer keeps existing user files in the
-installed `custom_decoders` directory.
+`--target` accepts either the plugins directory itself or an IDA installation
+directory; the installer appends `plugins` when needed. When no mode flag is
+given, legacy behaviour is preserved: `--target`, `--dry-run`, `--no-compile`
+and `--uninstall` act on the IDA plugin only. Use `--all`, `--mcp-only` or
+`--interactive` to include the MCP component. `--yes` without a mode or legacy
+flag installs both components. Use `--interactive` to force the wizard when
+stdin is not a TTY (for example in a CI shell).
+
+The MCP part uses `install_mcp.py` under the hood and preserves every existing
+server entry. Restart IDA after installation. Open **Edit > Plugins > String
+Decryptor** or press **Ctrl-Shift-D**.
 
 ## IDA usage
 
@@ -450,6 +496,7 @@ python tests\smoke_custom.py
 python tests\smoke_peelf.py
 python tests\smoke_mcp.py
 python tests\smoke_install_mcp.py
+python tests\smoke_install.py
 ```
 
 IDA integration tests (use fresh database copies):
