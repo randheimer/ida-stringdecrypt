@@ -112,6 +112,7 @@ def install(source_root: Path, target_plugins: Path, *, dry_run: bool = False, c
 
     print("\nInstalled. Restart IDA and open Edit > Plugins > String Decryptor")
     print("or press Ctrl-Shift-D.")
+    print("For AI clients, run: python install_mcp.py --auto")
     return install_dir
 
 

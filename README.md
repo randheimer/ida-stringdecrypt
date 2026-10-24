@@ -20,6 +20,7 @@ dependency. AES, DES and RC4 are implemented in `stringdecrypt/purecrypto/`.
 - Complete CLI with stable JSON/JSONL output for automation and AI agents
 - Dependency-free MCP stdio server (`mcp_server.py`) for AI agents, usable next
   to the official IDA 9.5 MCP server
+- One-command MCP registration for installed AI clients (`install_mcp.py`)
 - Pluggable custom decoders (`custom_decoders/*.py`)
 - IDA 9.5 plugin UI (PySide6), press **Ctrl-Shift-D**
 
@@ -208,7 +209,54 @@ Tools:
 The server speaks MCP protocol versions `2025-06-18`, `2025-03-26` and
 `2024-11-05`, and honors read-only tool annotations.
 
-### Register the server
+### Automatic setup for AI clients
+
+There is no universal MCP auto-discovery. Every AI client reads its own
+configuration file; an agent cannot see the server until that file names it.
+`install_mcp.py` detects the clients installed on this machine and merges a
+single `stringdecrypt` entry into each config. Existing servers are preserved,
+and a timestamped backup is written before every change.
+
+```powershell
+python install_mcp.py                      # detect clients and show status
+python install_mcp.py --auto --dry-run     # preview all changes
+python install_mcp.py --auto               # configure every detected client
+python install_mcp.py --client antigravity --client claude-code
+python install_mcp.py --auto --uninstall   # remove the entry again
+python install_mcp.py --auto --json        # machine-readable result
+```
+
+`--auto` touches only clients detected through their config directory,
+extension folder or executable. An explicit `--client <key>` writes that
+client even when detection missed it. Supported keys:
+
+| Key | Client | Configuration |
+| --- | --- | --- |
+| `opencode` | OpenCode | `~/.config/opencode/opencode.json` (`mcp.servers`) |
+| `antigravity` | Antigravity | `~/.gemini/config/mcp_config.json` (`mcpServers`) |
+| `claude-code` | Claude Code | `~/.claude.json` (`mcpServers`, user scope) |
+| `claude-desktop` | Claude Desktop | `%APPDATA%\Claude\claude_desktop_config.json` |
+| `codex` | Codex / ChatGPT desktop | `~/.codex/config.toml` (`[mcp_servers.stringdecrypt]`) |
+| `vscode` | VS Code | `%APPDATA%\Code\User\mcp.json` (`servers`) |
+| `vscode-insiders` | VS Code Insiders | `%APPDATA%\Code - Insiders\User\mcp.json` |
+| `cursor` | Cursor | `~/.cursor/mcp.json` (`mcpServers`) |
+| `windsurf` | Windsurf | `%USERPROFILE%\.codeium\windsurf\mcp_config.json` |
+| `cline` | Cline | VS Code globalStorage `cline_mcp_settings.json` |
+| `roo` | Roo Code | VS Code globalStorage `mcp_settings.json` |
+| `gemini-cli` | Gemini CLI | `~/.gemini/settings.json` (`mcpServers`) |
+| `copilot-cli` | GitHub Copilot CLI | `~/.copilot/mcp-config.json` (`mcpServers`) |
+
+The generated entries point at absolute paths, so rerun the installer if the
+repository is moved or a different Python interpreter should be used. JSONC
+files with comments are skipped unless `--allow-jsonc` is passed; that option
+rewrites the file and does not preserve comments. Use `--no-backup` to suppress
+the `.bak-*` files.
+
+After installation, most clients need a reload or a new session: reload the VS
+Code window, refresh Antigravity's MCP servers, or start a new Claude/Codex
+session. OpenCode V2 reloads its configuration automatically.
+
+### Register the server manually
 
 Print a configuration with the correct absolute Python and script paths:
 
@@ -401,6 +449,7 @@ python tests\smoke_engine.py
 python tests\smoke_custom.py
 python tests\smoke_peelf.py
 python tests\smoke_mcp.py
+python tests\smoke_install_mcp.py
 ```
 
 IDA integration tests (use fresh database copies):
