@@ -149,7 +149,7 @@ def main() -> int:
             check=True,
         )
         config_payload = json.loads(config.stdout)
-        server_config = config_payload["mcp"]["stringdecrypt"]
+        server_config = config_payload["mcp"]["servers"]["stringdecrypt"]
         assert server_config["type"] == "local"
         assert server_config["command"][0] == sys.executable
         assert os.path.isfile(server_config["command"][1]), server_config["command"]

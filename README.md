@@ -242,16 +242,24 @@ OpenCode (`opencode.json` / global config):
 {
   "$schema": "https://opencode.ai/config.json",
   "mcp": {
-    "stringdecrypt": {
-      "type": "local",
-      "command": [
-        "C:\\Python314\\python.exe",
-        "C:\\Users\\you\\ida_stringdecrypt\\mcp_server.py"
-      ],
-      "enabled": true
+    "servers": {
+      "stringdecrypt": {
+        "type": "local",
+        "command": [
+          "C:\\Python314\\python.exe",
+          "C:\\Users\\you\\ida_stringdecrypt\\mcp_server.py"
+        ]
+      }
     }
   }
 }
+```
+
+The CLI writes the same entry without disturbing other servers:
+
+```powershell
+opencode mcp add stringdecrypt --global -- "C:\Python314\python.exe" "C:\Users\you\ida_stringdecrypt\mcp_server.py"
+opencode mcp list
 ```
 
 VS Code `.vscode/mcp.json`:
@@ -268,7 +276,8 @@ VS Code `.vscode/mcp.json`:
 }
 ```
 
-Restart or reload the MCP client after editing its configuration. The client
+Restart or reload the MCP client after editing its configuration. OpenCode V2
+watches its configuration and reloads MCP servers automatically. The client
 should list `scan_binary`, `decrypt_blob` and `list_schemes`.
 
 ### Example agent workflow

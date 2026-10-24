@@ -544,10 +544,11 @@ def _config_payload(style: str) -> dict:
         return {
             "$schema": "https://opencode.ai/config.json",
             "mcp": {
-                "stringdecrypt": {
-                    "type": "local",
-                    "command": command,
-                    "enabled": True,
+                "servers": {
+                    "stringdecrypt": {
+                        "type": "local",
+                        "command": command,
+                    }
                 }
             },
         }
