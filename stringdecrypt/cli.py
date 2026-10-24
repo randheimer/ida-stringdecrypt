@@ -53,6 +53,8 @@ def _apply_schemes(config: ScanConfig, schemes: list[str]) -> None:
     heavy = any(name in requested for name in ("rc4", "aes", "des"))
     if not heavy and not config.force_heavy:
         config.max_cipher_keys = 0
+    if not heavy:
+        config.enable_heavy = False
 
 
 def _confidence(score: float) -> str:
@@ -232,6 +234,67 @@ def _scan_file(path: str, args: argparse.Namespace) -> dict:
         },
         "results": output_results,
     }
+
+
+def scan_path(
+    path: str,
+    *,
+    min_score: float = 60.0,
+    min_length: int = 5,
+    max_results: int = 2000,
+    max_candidates: int = 30000,
+    max_input: int = 8192,
+    max_entropy_blobs: int = 2048,
+    schemes: Sequence[str] | None = None,
+    keys: Sequence[str] | None = None,
+    ivs: Sequence[str] | None = None,
+    cribs: Sequence[str] | None = None,
+    custom_dirs: Sequence[str] | None = None,
+    include_entropy: bool = True,
+    include_code: bool = False,
+    force_heavy: bool = False,
+    heavy: bool = True,
+    custom: bool = True,
+) -> dict:
+    """Programmatic equivalent of ``stringdecrypt scan --format json``.
+
+    Used by the MCP server and other integrations.  Raises ``OSError`` or
+    ``peelf.BinaryParseError`` for unusable inputs.
+    """
+    args = argparse.Namespace(
+        min_length=max(2, int(min_length)),
+        min_score=float(min_score),
+        max_results=max(1, int(max_results)),
+        max_candidates=max(1, int(max_candidates)),
+        max_input=max(16, int(max_input)),
+        max_entropy_blobs=max(0, int(max_entropy_blobs)),
+        no_entropy=not include_entropy,
+        include_code=bool(include_code),
+        no_base64=False,
+        no_xor=False,
+        no_xorstr=False,
+        no_add=False,
+        no_sub=False,
+        no_rol=False,
+        no_rc4=False,
+        no_aes=False,
+        no_des=False,
+        no_heavy=not heavy,
+        no_custom=not custom,
+        force_heavy=bool(force_heavy),
+        schemes=[",".join(schemes)] if schemes else None,
+        keys=list(keys or []),
+        key_file=None,
+        ivs=list(ivs or []),
+        iv_file=None,
+        cribs=list(cribs or []),
+        crib_file=None,
+        custom_dir=list(custom_dirs or []),
+        quiet=True,
+        pretty=True,
+        format="json",
+    )
+    return _scan_file(path, args)
 
 
 def _print_text(payload: dict) -> None:

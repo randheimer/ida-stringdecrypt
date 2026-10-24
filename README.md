@@ -18,6 +18,8 @@ dependency. AES, DES and RC4 are implemented in `stringdecrypt/purecrypto/`.
   cribs
 - Confidence scoring with `[StringDecrypt]` comments at a configurable threshold
 - Complete CLI with stable JSON/JSONL output for automation and AI agents
+- Dependency-free MCP stdio server (`mcp_server.py`) for AI agents, usable next
+  to the official IDA 9.5 MCP server
 - Pluggable custom decoders (`custom_decoders/*.py`)
 - IDA 9.5 plugin UI (PySide6), press **Ctrl-Shift-D**
 
@@ -127,7 +129,7 @@ executable sections, `--force-heavy` to run RC4/AES/DES on every candidate, and
 ```json
 {
   "tool": "ida-stringdecrypt",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "ok": true,
   "file": "C:\\samples\\sample.exe",
   "image": {
@@ -187,6 +189,146 @@ top-level fields.
 
 Confidence labels: `high` >= 85, `medium` >= 70, `low` >= 55, otherwise
 `very_low`.
+
+## MCP server (AI agents)
+
+`mcp_server.py` is a dependency-free MCP (Model Context Protocol) stdio server
+that exposes the same PE/ELF engine to any MCP-capable agent: OpenCode, Claude
+Desktop, Cline, VS Code, custom tooling, and so on. It does **not** need IDA,
+PySide6 or the `mcp` Python package, and it never writes to the binary.
+
+Tools:
+
+| Tool | Purpose |
+| --- | --- |
+| `scan_binary` | Scan a PE/ELF path; keys are guessed automatically. Returns addresses, schemes, keys, scores and plaintext. |
+| `decrypt_blob` | Try automatic decryption on one hex/Base64/text ciphertext blob. |
+| `list_schemes` | Return supported schemes, encodings, protocol versions and server metadata. |
+
+The server speaks MCP protocol versions `2025-06-18`, `2025-03-26` and
+`2024-11-05`, and honors read-only tool annotations.
+
+### Register the server
+
+Print a configuration with the correct absolute Python and script paths:
+
+```powershell
+cd "C:\Users\Administrator\Documents\Standardprojekt\ida_stringdecrypt"
+python mcp_server.py --print-config
+python mcp_server.py --print-config --config-style opencode
+python mcp_server.py --print-config --config-style vscode
+```
+
+Use the Python interpreter that should run the scanner, for example the system
+Python or IDA's Python. The server only needs the standard library plus this
+repository.
+
+Generic `mcpServers` format (Claude Desktop, Cline, many clients):
+
+```json
+{
+  "mcpServers": {
+    "stringdecrypt": {
+      "command": "C:\\Python314\\python.exe",
+      "args": ["C:\\Users\\you\\ida_stringdecrypt\\mcp_server.py"]
+    }
+  }
+}
+```
+
+OpenCode (`opencode.json` / global config):
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "stringdecrypt": {
+      "type": "local",
+      "command": [
+        "C:\\Python314\\python.exe",
+        "C:\\Users\\you\\ida_stringdecrypt\\mcp_server.py"
+      ],
+      "enabled": true
+    }
+  }
+}
+```
+
+VS Code `.vscode/mcp.json`:
+
+```json
+{
+  "servers": {
+    "stringdecrypt": {
+      "type": "stdio",
+      "command": "C:\\Python314\\python.exe",
+      "args": ["C:\\Users\\you\\ida_stringdecrypt\\mcp_server.py"]
+    }
+  }
+}
+```
+
+Restart or reload the MCP client after editing its configuration. The client
+should list `scan_binary`, `decrypt_blob` and `list_schemes`.
+
+### Example agent workflow
+
+```text
+scan_binary({"path": "C:\\samples\\sample.exe", "min_score": 70})
+```
+
+The result is the same JSON payload as `--format json`, so each hit includes
+`address`, `ea`, `file_offset`, `scheme`, `key`, `pipeline`, `plaintext`,
+`score` and `confidence`. Useful options:
+
+| Argument | Default | Meaning |
+| --- | --- | --- |
+| `path` | required | Native PE or ELF file. |
+| `min_score` | 60 | Confidence threshold. Use 70+ for triage, 55 for recall. |
+| `schemes` | all | `base64,xor,xorstr,add,sub,rol,rc4,aes,des,custom`. |
+| `keys`, `ivs`, `cribs` | empty | Optional; automatic discovery is the default. |
+| `heavy` | true | Set false to skip RC4/AES/DES for fast triage. |
+| `max_candidates` | 5000 | Lower for speed, raise for large binaries. |
+| `max_results` | 200 | Cap on returned hits (maximum 5000). |
+
+`decrypt_blob` accepts `data`, `data_encoding` (`hex`, `base64`, `text`,
+`latin-1`) plus the same scheme/key options, which is handy for a blob
+extracted by another tool.
+
+### Using it with the official IDA MCP
+
+IDA 9.5 ships the official Hex-Rays IDA MCP server, which multiplexes an open
+IDA database for disassembly, decompilation and xrefs. This server is a
+companion, not a replacement: register both under distinct names, for example
+`ida` and `stringdecrypt`.
+
+Typical combined workflow:
+
+1. Use the official IDA MCP tools to inspect the target and locate suspicious
+   data references.
+2. Call `scan_binary` on the same file (or `decrypt_blob` on a specific blob).
+3. Feed a returned address back to the official IDA MCP tools to view the
+   surrounding code, xrefs or decompilation.
+
+The official IDA MCP documentation recommends disabling *competing IDA MCP
+servers* to avoid confusing the agent. This server does not connect to IDA or
+claim the same tools, so it can run alongside the official one; keeping the
+server names distinct keeps the agent's tool selection unambiguous.
+
+Addresses returned by `scan_binary` are PE virtual addresses using the image
+base in the file. If IDA loaded the image at a different base, add the rebase
+delta before using an address there.
+
+### Verify the server
+
+```powershell
+$env:PYTHONPATH = (Get-Location).Path
+python tests\smoke_mcp.py
+```
+
+The smoke test initializes an MCP session, lists tools, scans the PE64 fixture,
+and decrypts a single XOR blob. The server also works with the official MCP
+Python SDK as a client.
 
 ## Detection and scoring
 
@@ -249,6 +391,7 @@ python tests\smoke_scoring.py
 python tests\smoke_engine.py
 python tests\smoke_custom.py
 python tests\smoke_peelf.py
+python tests\smoke_mcp.py
 ```
 
 IDA integration tests (use fresh database copies):

@@ -3,7 +3,7 @@
   "plugin": {
     "name": "ida-stringdecrypt",
     "entryPoint": "ida_stringdecrypt_plugin.py",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "description": "Automatic native string and ciphertext decryptor. Tries XOR, XorStr, Add/Sub/Rol, Base64, RC4, AES and DES, scores the plaintext, and optionally adds non-destructive comments.",
     "idaVersions": ">=9.0",
     "requiresPython": ">=3.9",
@@ -20,7 +20,9 @@
       "aes",
       "des",
       "base64",
-      "malware"
+      "malware",
+      "mcp",
+      "ai"
     ]
   }
 }
