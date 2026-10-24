@@ -291,7 +291,13 @@ class StringDecryptForm(ida_kernwin.PluginForm):
 
         grid.addWidget(QtWidgets.QLabel("Keys:"), 2, 0)
         self.key_edit = QtWidgets.QLineEdit()
-        self.key_edit.setPlaceholderText("comma separated: ascii:secret, hex:00112233, 0x4142")
+        self.key_edit.setPlaceholderText(
+            "optional — leave empty to auto-guess keys from imports, names and strings"
+        )
+        self.key_edit.setToolTip(
+            "Leave this empty for automatic key discovery. Add keys only if the "
+            "binary hides the key at runtime or the automatic scan misses a known cipher."
+        )
         grid.addWidget(self.key_edit, 2, 1, 1, 9)
 
         grid.addWidget(QtWidgets.QLabel("IVs:"), 3, 0)

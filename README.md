@@ -77,6 +77,17 @@ Defaults in the form:
 Keyed ciphers and custom decoders are enabled. Scanning strings from executable
 sections and forcing heavy ciphers on every candidate are off by default.
 
+**Keys and IVs are optional.** Leave the **Keys**, **IVs** and **Cribs** fields
+empty to use automatic discovery. The plugin tries single-byte XOR/Add/Sub/Rol
+and Base64 exhaustively, and derives RC4/AES/DES keys from imports, function
+and section names, candidate strings/blobs and built-in cribs (AES material
+keys of 16/24/32 bytes, DES keys of 8 bytes, any short RC4 material). Short
+user keys are zero-padded and long user keys are truncated to valid cipher
+sizes. If a strong
+cipher uses a random runtime-only key, no scanner can brute-force it — supply
+that key with `--keys` (CLI) or the **Keys** field (UI), or use a known-plaintext
+crib.
+
 Comments are **non-destructive**: existing comments are preserved and a new
 `[StringDecrypt] ...` line is appended. Addresses that already contain a
 `[StringDecrypt]` comment are skipped. The plugin does not patch bytes by
